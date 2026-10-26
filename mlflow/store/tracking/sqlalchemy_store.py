@@ -3818,21 +3818,47 @@ class SqlAlchemyStore(
                 attr_filters.append(comp_func(getattr(SqlLoggedModel, comp.entity.key), value))
             elif comp.entity.type == EntityType.METRIC:
                 has_metric_filters = True
-                metric_filters = [
-                    SqlLoggedModelMetric.metric_name == comp.entity.key,
-                    comp_func(SqlLoggedModelMetric.metric_value, comp.value),
-                ]
+                # Restrict the comparison to the latest row per
+                # (model_id, metric_name, dataset_name, dataset_digest). Matching any
+                # historical step would disagree with FileStore and search_runs, which
+                # use the latest value (highest step, then timestamp, then value).
+                metric_filters = [SqlLoggedModelMetric.metric_name == comp.entity.key]
                 if dataset_filters:
                     metric_filters.append(sqlalchemy.or_(*dataset_filters))
-                # Select distinct model IDs rather than whole metric rows. A model
-                # can log the same metric at several steps, runs or datasets, and
-                # joining those rows would duplicate the model before OFFSET/LIMIT
-                # is applied, so a page could hold fewer models than requested and
-                # pagination could stop while matches remain.
+                latest = (
+                    session
+                    .query(
+                        SqlLoggedModelMetric.model_id,
+                        SqlLoggedModelMetric.metric_value,
+                        func
+                        .row_number()
+                        .over(
+                            partition_by=[
+                                SqlLoggedModelMetric.model_id,
+                                SqlLoggedModelMetric.metric_name,
+                                SqlLoggedModelMetric.dataset_name,
+                                SqlLoggedModelMetric.dataset_digest,
+                            ],
+                            order_by=[
+                                SqlLoggedModelMetric.metric_step.desc(),
+                                SqlLoggedModelMetric.metric_timestamp_ms.desc(),
+                                SqlLoggedModelMetric.metric_value.desc(),
+                            ],
+                        )
+                        .label("row_num"),
+                    )
+                    .filter(*metric_filters)
+                    .subquery()
+                )
+                # Distinct model IDs: a metric can exist on several datasets, and
+                # joining those rows would duplicate the model before OFFSET/LIMIT.
                 non_attr_filters.append(
                     session
-                    .query(SqlLoggedModelMetric.model_id)
-                    .filter(*metric_filters)
+                    .query(latest.c.model_id)
+                    .filter(
+                        latest.c.row_num == 1,
+                        comp_func(latest.c.metric_value, comp.value),
+                    )
                     .distinct()
                     .subquery()
                 )
