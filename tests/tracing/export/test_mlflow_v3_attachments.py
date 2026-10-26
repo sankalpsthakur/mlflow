@@ -1,6 +1,14 @@
+import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from mlflow.entities.trace_info import TraceInfo
+from mlflow.entities.trace_location import TraceLocation
+from mlflow.entities.trace_state import TraceState
+from mlflow.exceptions import MlflowException, MlflowTraceDataCorrupted
 from mlflow.tracing.attachments import Attachment
+from mlflow.tracing.client import TracingClient
 from mlflow.tracing.constant import SpansLocation, TraceTagKey
 from mlflow.tracing.export.mlflow_v3 import MlflowV3SpanExporter
 
@@ -104,6 +112,80 @@ def test_trace_data_still_lands_when_attachment_upload_fails():
     # Trace data was still uploaded despite attachment failure
     mock_client._upload_trace_data.assert_called_once_with(returned_info, trace.data)
     mock_client._upload_attachments.assert_called_once()
+
+
+def _uc_table_trace_info(trace_id="trace:/cat.sch.mlflow_experiment/abc123"):
+    return TraceInfo(
+        trace_id=trace_id,
+        trace_location=TraceLocation.from_databricks_uc_table_prefix(
+            "cat", "sch", "mlflow_experiment"
+        ),
+        request_time=0,
+        state=TraceState.OK,
+        tags={},
+    )
+
+
+@pytest.mark.parametrize(
+    "trace_location",
+    [
+        TraceLocation.from_databricks_uc_table_prefix("cat", "sch", "mlflow_experiment"),
+        TraceLocation.from_databricks_uc_schema("cat", "sch"),
+    ],
+)
+def test_upload_attachments_uc_table_raises_clear_error(trace_location):
+    att = Attachment(content_type="image/png", content_bytes=b"img")
+    info = TraceInfo(
+        trace_id="trace:/cat.sch.mlflow_experiment/abc123",
+        trace_location=trace_location,
+        request_time=0,
+        state=TraceState.OK,
+        tags={},
+    )
+    with patch("mlflow.tracing.client._get_store"):
+        client = TracingClient()
+
+    with pytest.raises(MlflowException, match="not supported for Unity Catalog table traces"):
+        client._upload_attachments(info, {att.id: att})
+
+
+def test_upload_attachments_missing_artifact_location_still_reports_corrupted():
+    att = Attachment(content_type="image/png", content_bytes=b"img")
+    info = TraceInfo(
+        trace_id="tr-test123",
+        trace_location=TraceLocation.from_experiment_id("0"),
+        request_time=0,
+        state=TraceState.OK,
+        tags={},
+    )
+    with patch("mlflow.tracing.client._get_store"):
+        client = TracingClient()
+
+    with pytest.raises(MlflowTraceDataCorrupted, match="Trace data is corrupted"):
+        client._upload_attachments(info, {att.id: att})
+
+
+def test_log_trace_uc_table_does_not_report_corrupted_for_attachments(caplog):
+    att = Attachment(content_type="image/png", content_bytes=b"img")
+    trace = _make_trace({att.id: att})
+
+    mock_client = MagicMock()
+    mock_client.start_trace.return_value = _uc_table_trace_info()
+    with patch("mlflow.tracing.client._get_store"):
+        real_client = TracingClient()
+    mock_client._upload_attachments = real_client._upload_attachments
+
+    exporter = _make_exporter(mock_client)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patch("mlflow.tracing.export.mlflow_v3.try_link_prompts_to_trace"),
+        patch("mlflow.tracing.export.mlflow_v3.add_size_stats_to_trace_metadata"),
+    ):
+        exporter._log_trace(trace, prompts=[])
+
+    assert "Trace data is corrupted" not in caplog.text
+    assert "not supported for Unity Catalog table traces" in caplog.text
 
 
 def test_log_trace_skips_upload_when_no_attachments():

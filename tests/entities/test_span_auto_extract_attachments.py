@@ -568,6 +568,44 @@ def test_two_pass_with_explicit_attachment_and_pydantic():
     assert len(span._attachments) == 2
 
 
+# --- Unity Catalog table traces (no artifact store) ---
+
+UC_TRACE_ID = "trace:/cat.sch.mlflow_experiment/abc123"
+
+
+def test_uc_table_trace_keeps_data_uri_inline():
+    span = _make_live_span(trace_id=UC_TRACE_ID)
+    span.set_inputs({
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is on this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": PNG_DATA_URI},
+                    },
+                ],
+            }
+        ]
+    })
+
+    url = span.inputs["messages"][0]["content"][1]["image_url"]["url"]
+    assert url == PNG_DATA_URI
+    assert span._attachments == {}
+
+
+def test_uc_table_trace_inlines_explicit_attachment():
+    span = _make_live_span(trace_id=UC_TRACE_ID)
+    att = Attachment(content_type="image/png", content_bytes=PNG_BYTES)
+    span.set_inputs({"image": att})
+
+    image = span.inputs["image"]
+    assert image.startswith("data:image/png;base64,")
+    assert base64.b64decode(image.split(",", 1)[1]) == PNG_BYTES
+    assert span._attachments == {}
+
+
 # --- Opt-out ---
 
 

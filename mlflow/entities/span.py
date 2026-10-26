@@ -26,7 +26,7 @@ from mlflow.entities.span_status import SpanStatus, SpanStatusCode
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.tracing.attachments import Attachment
-from mlflow.tracing.constant import TRACE_REQUEST_ID_PREFIX, SpanAttributeKey
+from mlflow.tracing.constant import TRACE_ID_V4_PREFIX, TRACE_REQUEST_ID_PREFIX, SpanAttributeKey
 from mlflow.tracing.utils import (
     build_otel_context,
     construct_trace_id_v4,
@@ -720,6 +720,11 @@ def _encode_bytes_to_base64(bytes: bytes) -> str:
     return base64.b64encode(bytes).decode("utf-8")
 
 
+def _attachment_to_data_uri(attachment: Attachment) -> str:
+    encoded = _encode_bytes_to_base64(attachment.content_bytes)
+    return f"data:{attachment.content_type};base64,{encoded}"
+
+
 def _decode_id_from_byte(trace_or_span_id_b64: str) -> int:
     # Decoding the base64 encoded trace or span ID to bytes and then converting it to int.
     bytes = base64.b64decode(trace_or_span_id_b64)
@@ -876,8 +881,14 @@ class LiveSpan(Span):
     def _store_attachment(self, attachment: Attachment) -> str:
         from mlflow.environment_variables import MLFLOW_TRACE_MAX_ATTACHMENT_SIZE
 
+        # Unity Catalog table traces have no artifact store. Persist bytes inline as a
+        # data URI instead of an mlflow-attachment:// reference that cannot be uploaded.
+        inline = self._is_uc_table_trace()
+
         if not self._is_recording():
             _logger.debug("Skipping attachment storage because the span is no longer recording.")
+            if inline:
+                return _attachment_to_data_uri(attachment)
             return attachment.ref(self.trace_id)
 
         max_size = MLFLOW_TRACE_MAX_ATTACHMENT_SIZE.get()
@@ -890,15 +901,20 @@ class LiveSpan(Span):
             _logger.warning(msg)
             self.record_exception(msg)
             return f"[Attachment too large: {size_bytes} bytes exceeds {max_size} bytes limit]"
+        if inline:
+            return _attachment_to_data_uri(attachment)
         ref = attachment.ref(self.trace_id)
         self._attachments[attachment.id] = attachment
         return ref
 
-    @staticmethod
-    def _should_extract_base64() -> bool:
+    def _is_uc_table_trace(self) -> bool:
+        trace_id = self.trace_id
+        return isinstance(trace_id, str) and trace_id.startswith(TRACE_ID_V4_PREFIX)
+
+    def _should_extract_base64(self) -> bool:
         from mlflow.environment_variables import MLFLOW_TRACE_EXTRACT_ATTACHMENTS
 
-        return MLFLOW_TRACE_EXTRACT_ATTACHMENTS.get()
+        return MLFLOW_TRACE_EXTRACT_ATTACHMENTS.get() and not self._is_uc_table_trace()
 
     def _try_convert_data_uri(self, value: str) -> str | None:
         if not value.startswith("data:") or ";base64," not in value:
