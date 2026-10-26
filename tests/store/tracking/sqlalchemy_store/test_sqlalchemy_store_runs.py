@@ -4280,6 +4280,66 @@ def test_search_logged_models_metric_filter_does_not_shrink_pages(store: SqlAlch
     assert len(actual_names) == len(set(actual_names))
 
 
+def test_search_logged_models_metric_filter_uses_latest_step(store: SqlAlchemyStore):
+    """Metric filters compare the latest step, not any historical value."""
+    exp_id = store.create_experiment(f"exp-{uuid.uuid4()}")
+    run_id = store.create_run(
+        experiment_id=exp_id, user_id="user", start_time=0, run_name="run", tags=[]
+    ).info.run_id
+    diverged = store.create_logged_model(experiment_id=exp_id, name="diverged")
+    improved = store.create_logged_model(experiment_id=exp_id, name="improved")
+
+    store.log_batch(
+        run_id,
+        metrics=[
+            Metric("val_loss", 0.05, 1, 0, model_id=diverged.model_id),
+            Metric("val_loss", 0.3, 2, 1, model_id=diverged.model_id),
+            Metric("val_loss", 5.0, 3, 2, model_id=diverged.model_id),
+            Metric("val_loss", 0.4, 1, 0, model_id=improved.model_id),
+            Metric("val_loss", 0.2, 2, 1, model_id=improved.model_id),
+            Metric("val_loss", 0.08, 3, 2, model_id=improved.model_id),
+        ],
+        params=[],
+        tags=[],
+    )
+
+    hits = store.search_logged_models(
+        experiment_ids=[exp_id], filter_string="metrics.val_loss < 0.1"
+    )
+    assert [m.name for m in hits] == ["improved"]
+
+    ds_diverged = store.create_logged_model(experiment_id=exp_id, name="ds-diverged")
+    ds_improved = store.create_logged_model(experiment_id=exp_id, name="ds-improved")
+    store.log_batch(
+        run_id,
+        metrics=[
+            Metric("val_loss", 0.05, 10, 0, ds_diverged.model_id, "eval", "d1"),
+            Metric("val_loss", 5.0, 11, 2, ds_diverged.model_id, "eval", "d1"),
+            # Matching latest value on a different dataset must not leak into
+            # an eval-scoped search.
+            Metric("val_loss", 0.01, 11, 2, ds_diverged.model_id, "train", "d2"),
+            Metric("val_loss", 0.4, 10, 0, ds_improved.model_id, "eval", "d1"),
+            Metric("val_loss", 0.08, 11, 2, ds_improved.model_id, "eval", "d1"),
+        ],
+        params=[],
+        tags=[],
+    )
+
+    dataset_hits = store.search_logged_models(
+        experiment_ids=[exp_id],
+        filter_string="metrics.val_loss < 0.1",
+        datasets=[{"dataset_name": "eval"}],
+    )
+    assert [m.name for m in dataset_hits] == ["ds-improved"]
+
+    digest_hits = store.search_logged_models(
+        experiment_ids=[exp_id],
+        filter_string="metrics.val_loss < 0.1",
+        datasets=[{"dataset_name": "eval", "dataset_digest": "d1"}],
+    )
+    assert [m.name for m in digest_hits] == ["ds-improved"]
+
+
 def test_search_logged_models_eager_loads_tags_params_and_metrics(store: SqlAlchemyStore):
     exp_id = store.create_experiment(f"exp-{uuid.uuid4()}")
     run = store.create_run(
