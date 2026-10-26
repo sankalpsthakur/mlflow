@@ -4316,10 +4316,11 @@ def test_search_logged_models_metric_filter_uses_latest_step(store: SqlAlchemySt
             Metric("val_loss", 0.05, 10, 0, ds_diverged.model_id, "eval", "d1"),
             Metric("val_loss", 5.0, 11, 2, ds_diverged.model_id, "eval", "d1"),
             # Matching latest value on a different dataset must not leak into
-            # an eval-scoped search.
-            Metric("val_loss", 0.01, 11, 2, ds_diverged.model_id, "train", "d2"),
-            Metric("val_loss", 0.4, 10, 0, ds_improved.model_id, "eval", "d1"),
-            Metric("val_loss", 0.08, 11, 2, ds_improved.model_id, "eval", "d1"),
+            # an eval-scoped search. Timestamp differs because dataset is not
+            # part of logged_model_metrics PK.
+            Metric("val_loss", 0.01, 12, 2, ds_diverged.model_id, "train", "d2"),
+            Metric("val_loss", 0.4, 13, 0, ds_improved.model_id, "eval", "d1"),
+            Metric("val_loss", 0.08, 14, 2, ds_improved.model_id, "eval", "d1"),
         ],
         params=[],
         tags=[],
