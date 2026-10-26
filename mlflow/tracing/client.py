@@ -31,7 +31,7 @@ from mlflow.entities.span import NO_OP_SPAN_TRACE_ID, Span
 from mlflow.entities.trace import Trace
 from mlflow.entities.trace_data import TraceData
 from mlflow.entities.trace_info import TraceInfo
-from mlflow.entities.trace_location import UCSchemaLocation, UnityCatalog
+from mlflow.entities.trace_location import TraceLocationType, UCSchemaLocation, UnityCatalog
 from mlflow.environment_variables import (
     _MLFLOW_SEARCH_TRACES_MAX_BATCH_SIZE,
     MLFLOW_GET_TRACE_OTEL_INITIAL_RETRY_INTERVAL_SECONDS,
@@ -69,7 +69,7 @@ from mlflow.tracing.utils import TraceJSONEncoder, exclude_immutable_tags, parse
 from mlflow.tracing.utils.artifact_utils import get_artifact_uri_for_trace
 from mlflow.tracking._tracking_service.utils import _get_store, _resolve_tracking_uri
 from mlflow.utils import is_uuid
-from mlflow.utils.mlflow_tags import IMMUTABLE_TAGS
+from mlflow.utils.mlflow_tags import IMMUTABLE_TAGS, MLFLOW_ARTIFACT_LOCATION
 from mlflow.utils.thread_utils import map_with_context
 from mlflow.utils.uri import add_databricks_profile_info_to_artifact_uri, is_databricks_uri
 
@@ -802,6 +802,21 @@ class TracingClient:
         trace_info: TraceInfo,
         attachments: dict[str, Attachment],
     ) -> None:
+        tags = getattr(trace_info, "tags", None) or {}
+        if MLFLOW_ARTIFACT_LOCATION not in tags:
+            request_id = getattr(trace_info, "trace_id", None) or getattr(
+                trace_info, "request_id", None
+            )
+            loc_type = getattr(getattr(trace_info, "trace_location", None), "type", None)
+            if loc_type in (TraceLocationType.UC_SCHEMA, TraceLocationType.UC_TABLE_PREFIX):
+                raise MlflowException(
+                    "Trace attachments are not supported for Unity Catalog table traces "
+                    f"(request_id={request_id}). These traces have no artifact location, "
+                    "so attachment bytes cannot be uploaded.",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+            raise MlflowTraceDataCorrupted(request_id=request_id)
+
         artifact_repo = self._get_artifact_repo_for_trace(trace_info)
         for attachment_id, attachment in attachments.items():
             try:
